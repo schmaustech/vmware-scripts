@@ -1,4 +1,4 @@
-#!/opt/UDLPperl/bin/perl -w
+#!/usr/bin/perl -w
 #########################################################################################
 # This script generates an xls report file of the datastores in Virtual Center		#
 # (C) Benjamin Schmaus 06/2009								#
