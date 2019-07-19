@@ -1,0 +1,193 @@
+#!/opt/UDLPperl/bin/perl
+#################################################################################
+# Script that autodiscovers VM's and places the client name into prexisting	#
+# policies based on the datastore names discovered				#
+# (C) Benjamin Schmaus May, 2009						#
+################################################################################# 
+use strict;
+use warnings;
+use Socket;
+use VMware::VIRuntime;
+use VMware::VILib;
+use VMware::VIM25Stub;
+use Getopt::Long;
+
+### Main Logic ###
+my $bpplclients = '/usr/openv/netbackup/bin/admincmd/bpplclients';
+my ($help,$prefix,$vcserver,$username,$password,$dc,$os,$polpr,$datastorepol,$update,$master);
+my ($datastorepoltmp,$listds,$esxhost,$vmname,$adhostname,$ipaddress,$toolstat,$guestos,$datastore,$hostname,$junk,$junk2,$junk3,$client,$datastorefix,$polname,$gueststate);
+my @dslist = ();
+options();
+print "update is set to: $update\n";
+my $policy = "$polpr$datastorepol";
+my $url = "https://$vcserver/sdk/vimService";
+Vim::login(service_url => $url, user_name => $username, password => $password);
+my $datacenter_views = Vim::find_entity_views(view_type => 'Datacenter',filter => { name => $dc });
+my $dcds = Vim::find_entity_view(view_type => "Datacenter", filter => {'name' => "Fridley"} );
+my $ds = $dcds->datastore;
+
+if ($datastorepol eq "ALL") {
+	getlistds();
+	print "\n";
+}
+if ($update eq "0") {
+	polrmclients();
+	print "\n";
+}
+
+if ($datastorepol eq "ALL") {
+	print "Discovering new clients...\n";
+	# go through all policies and add new clients for all datastores
+	foreach (@dslist) {
+		$datastorepoltmp = $_;	
+		print "\tDatastore: $datastorepoltmp\n";
+		print "\tPolicy: $polpr$datastorepoltmp\n";
+		polgetclients();
+		print "\t\n";
+	}
+} else {
+	print "Discovering new clients...\n";
+	# go through all policies and add new clients for given datastore
+	$datastorepoltmp = $datastorepol;
+	print "\tCurrent Datastore: $datastorepoltmp\n";
+	print "\tCurrent Policy: $$polpr$datastorepoltmp\n";
+	polgetclients();
+	print "\t\n";
+}
+print "\n\n";
+Vim::logout();
+exit;
+
+
+sub polgetclients {
+	foreach (@$datacenter_views) {
+		my $datacenter = $_->name;
+		my $host_views = Vim::find_entity_views(view_type => 'HostSystem',begin_entity => $_ );
+		foreach (@$host_views) {
+			$esxhost = $_->name;
+			#print "\tESX Host Server: $esxhost\n";
+			my $vm_view = Vim::find_entity_views(view_type => 'VirtualMachine',begin_entity => $_ , filter => { 'guest.guestState' => 'running' });
+			foreach (@$vm_view) {
+				$vmname = $_->name;
+				$adhostname = $_->summary->guest->hostName;
+				$ipaddress = $_->summary->guest->ipAddress;
+				$toolstat = $_->summary->guest->toolsStatus->val;
+				$guestos = $_->summary->guest->guestFullName;
+				$datastore = $_->summary->config->vmPathName;
+				$gueststate = $_->guest->guestState;
+				($datastorefix,$junk) = split(/\] /,$datastore);
+				$datastorefix =~ s/\[//g;
+				$datastorefix =~ s/ /_/g;
+				if ($ipaddress) {
+					$hostname = gethostbyaddr(inet_aton($ipaddress), AF_INET);
+					#print "$ipaddress $hostname\n";
+					#if (!$hostname) { $hostname = '---'; }
+					#$hostname =~ s/.asd.udlp.com/.mpls.udlp.com/g;
+					#if (($hostname !~ /.mpls.udlp.com/) && ($hostname !~ /udlp.com/)) {
+					#	$hostname = "$hostname.mpls.udlp.com";
+					#}
+				}
+				if (!$hostname) { $hostname = '---'; }
+				$policy = "$polpr$datastorefix";
+				if ($datastorefix eq $datastorepoltmp) {
+					if ($toolstat =~ /toolsOk/) {
+						if ($guestos =~ /$os/) {
+							if ($hostname ne "---" && $hostname ne "localhost") {
+								my $addtopolicy = `$bpplclients $policy -M $master -add $hostname VMware Virtual_Machine > /dev/null 2>&1`;
+								if ($? eq "0") {
+									print "\t\tAdded $hostname\n";
+								} else {
+									print "\t\tSkipped $hostname: Already in policy\n";
+								}
+							} else {
+								print "\t\tSkipped $vmname: Reverse DNS does not exist\n";
+							}
+						} else {
+							print "\t\tSkipped $vmname: OS does not match guestos\n";
+						}
+					} else {
+						print "\t\tSkipped $vmname: Tools not okay - $toolstat\n";
+					}
+				}
+			}
+		}
+	}
+}
+
+sub polrmclients {
+	if ($datastorepol eq "ALL") {
+		foreach (@dslist) {
+			$policy = "$polpr$_";
+			print "Removing clients from $policy...\n";
+			my @polrm = `$bpplclients $policy -noheader`;
+			foreach (@polrm) {
+				($junk,$junk2,$client) = split(/ /,$_);
+				chomp($client);
+				my $remove = `$bpplclients $policy -M $master -delete $client > /dev/null 2>&1`;
+				if ($? eq "0") {
+                                	print "\t\tRemoved $client\n";
+                                } else {
+                                	print "\t\tSkipped $client: Not in policy\n";
+				}
+			}
+		}
+	} else { 
+		$policy = "$polpr$datastorepol";
+		my @polrm = `$bpplclients $policy -noheader`;
+		print "Removing clients from $policy...\n";
+		foreach (@polrm) {
+			($junk,$junk2,$client) = split(/ /,$_);
+			chomp($client);
+			my $remove = `$bpplclients $policy -M $master -delete $client > /dev/null 2>&1`;
+			if ($? eq "0") {
+                        	print "\t\tRemoved $client\n";
+                        } else {
+                        	print "\t\tSkipped $client: Not in policy\n";
+                        }
+		}
+	}
+}
+
+sub getlistds {
+	print "Getting list of datastores...\n";
+	my $counter = 0;
+	foreach(@$ds) {
+        	my $ds_ref = Vim::get_view(mo_ref => $_);
+        	my $ds = $ds_ref->info->name;
+        	if (($ds =~ /$prefix/) && ($prefix ne "---")) {
+                	$dslist[$counter] = $ds_ref->info->name;
+                	$dslist[$counter] =~ s/ /_/g;
+			$dslist[$counter] =~ s/\(|\)//g;
+			print "\tFound datastore: $dslist[$counter]\n";
+                	++$counter;
+        	} elsif  ($prefix eq "---") {
+                	$dslist[$counter] = $ds_ref->info->name;
+                	$dslist[$counter] =~ s/ /_/g;
+			$dslist[$counter] =~ s/\(|\)//g;
+			print "\tFound datastore: $dslist[$counter]\n";
+                	++$counter;
+        	}
+	}
+}
+
+sub options {
+        $vcserver="";$username="";$password="";$dc="";$os="";$polpr="";$master="";$update="0";$prefix="";$datastorepol="";
+        GetOptions ('h|help'=>\$help,'v|vcserver=s'=>\$vcserver,'u|username=s'=>\$username,'p|password=s'=>\$password,'d|datacenter=s'=>\$dc,'os=s'=>\$os,'pp|polpr=s'=>\$polpr,'m|master=s'=>\$master,'dsp=s'=>\$datastorepol,'pre|prefix=s'=>\$prefix,'update'=>\$update);
+        if ($help) {
+                print "Usage: autovcb -v <vc server> -u <username> -p <password> -d <datacenter in vc> -os <Windows|Solaris|Linux|Suse|Redhat> -pp <netbackup policy prefix> -m <master server> -dsp <(datastore name|ALL)> [-pre <datastore match prefix>] [-update]\n";
+                exit;
+        }
+        if (($vcserver eq "") || ($username eq "") || ($password eq "") || ($dc eq "") || ($os eq "") || ($polpr eq "") || ($master eq "") || ($datastorepol eq "")) {
+		print "Missing required parameters - Type -help for options\n";
+                exit;
+        }
+	if (($prefix) && ($datastorepol ne "ALL")) {
+		print "Cannot use prefix option when datastore is not set to ALL - Type -help for options\n";
+		exit;
+	}
+
+        if (($os ne "Windows") && ($os ne "Solaris") && ($os ne "Linux") && ($os ne "Suse") && ($os ne "Redhat")) {
+		print "Incorrect OS specified - Type -help for options\n";
+                exit;
+        }
+}
