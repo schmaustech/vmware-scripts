@@ -1,4 +1,4 @@
-#!/opt/UDLPperl/bin/perl
+#!/usr/bin/perl
 #################################################################################
 # Script that autodiscovers VM's and places the client name into prexisting     #
 # policies based on the datastore names discovered                              #
